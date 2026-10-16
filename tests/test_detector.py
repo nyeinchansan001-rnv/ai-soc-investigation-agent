@@ -85,7 +85,7 @@ def test_detects_five_failed_logins_within_five_minutes():
     assert len(alerts) == 1
     assert alerts[0]["failed_attempts"] == 5
 
-
+   
 def test_does_not_detect_five_failed_logins_spread_over_six_minutes():
     start = datetime.fromisoformat("2026-10-16T09:00:00")
 
@@ -104,3 +104,34 @@ def test_does_not_detect_five_failed_logins_spread_over_six_minutes():
     alerts = detect_failed_login_bursts(logs)
 
     assert alerts == []
+
+
+
+def test_successful_login_after_failures_does_not_suppress_alert():
+    start = datetime.fromisoformat("2026-10-16T09:00:00")
+
+    logs = [
+        {
+            "timestamp": (
+                start + timedelta(seconds=15 * i)
+            ).isoformat(),
+            "username": "admin",
+            "source_ip": "203.0.113.25",
+            "event_type": "login_failed",
+        }
+        for i in range(5)
+    ]
+
+    logs.append({
+        "timestamp": (
+            start + timedelta(minutes=2)
+        ).isoformat(),
+        "username": "admin",
+        "source_ip": "203.0.113.25",
+        "event_type": "login_success",
+    })
+
+    alerts = detect_failed_login_bursts(logs)
+
+    assert len(alerts) == 1
+    assert alerts[0]["failed_attempts"] == 5
