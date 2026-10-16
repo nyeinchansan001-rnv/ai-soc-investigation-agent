@@ -76,6 +76,33 @@ def enrich_alerts(state: InvestigationState) -> dict:
     return {"rule_alerts": enriched_alerts}
 
 
+def assign_investigation_priority(state: InvestigationState) -> dict:
+    """Assign a review priority using explicit alert evidence."""
+    prioritized_alerts = []
+
+    for alert in state["rule_alerts"]:
+        failed_attempts = alert.get("failed_attempts", 0)
+        successful_login_count = alert.get("successful_login_count", 0)
+
+        if successful_login_count > 0:
+            priority = "high"
+        elif failed_attempts >= 5:
+            priority = "medium"
+        else:
+            priority = "low"
+
+        prioritized_alerts.append({
+            **alert,
+            "investigation_priority": priority,
+            "priority_reason": (
+                f"{failed_attempts} failed login attempts; "
+                f"{successful_login_count} related successful logins."
+            ),
+        })
+
+    return {"rule_alerts": prioritized_alerts}
+
+
 def ask_local_llm(state: InvestigationState) -> dict:
     evidence = {
         "rule_alerts": state["rule_alerts"],
@@ -125,15 +152,18 @@ Write a concise report with these headings:
     return {"ai_analysis": analysis}
 
 
+
 builder = StateGraph(InvestigationState)
 builder.add_node("detect_events", detect_events)
 builder.add_node("enrich_alerts", enrich_alerts)
+builder.add_node("assign_investigation_priority", assign_investigation_priority)
 builder.add_node("summarize_findings", summarize_findings)
 builder.add_node("ask_local_llm", ask_local_llm)
 
 builder.add_edge(START, "detect_events")
 builder.add_edge("detect_events", "enrich_alerts")
-builder.add_edge("enrich_alerts", "summarize_findings")
+builder.add_edge("enrich_alerts", "assign_investigation_priority")
+builder.add_edge("assign_investigation_priority", "summarize_findings")
 builder.add_edge("summarize_findings", "ask_local_llm")
 builder.add_edge("ask_local_llm", END)
 
