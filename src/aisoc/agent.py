@@ -1,7 +1,8 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
+
 
 import httpx
 from langgraph.graph import END, START, StateGraph
@@ -34,6 +35,45 @@ def summarize_findings(state: InvestigationState) -> dict:
         summary = " ".join(alert["evidence"] for alert in alerts)
 
     return {"summary": summary}
+
+
+def enrich_alerts(state: InvestigationState) -> dict:
+    """Attach related successful logins as additional evidence."""
+    enriched_alerts = []
+
+    for alert in state["rule_alerts"]:
+        related_successes = []
+
+        first_seen = datetime.fromisoformat(alert["first_seen"])
+        last_seen = datetime.fromisoformat(alert["last_seen"])
+
+        for event in state["logs"]:
+            if event.get("event_type") != "login_success":
+                continue
+
+            if event.get("username") != alert["username"]:
+                continue
+
+            if event.get("source_ip") != alert["source_ip"]:
+                continue
+
+            timestamp = datetime.fromisoformat(event["timestamp"])
+
+            if first_seen <= timestamp <= last_seen + timedelta(minutes=5):
+                related_successes.append({
+                    "timestamp": event["timestamp"],
+                    "username": event["username"],
+                    "source_ip": event["source_ip"],
+                    "event_type": "login_success",
+                })
+
+        enriched_alerts.append({
+            **alert,
+            "related_successful_logins": related_successes,
+            "successful_login_count": len(related_successes),
+        })
+
+    return {"rule_alerts": enriched_alerts}
 
 
 def ask_local_llm(state: InvestigationState) -> dict:
@@ -87,15 +127,18 @@ Write a concise report with these headings:
 
 builder = StateGraph(InvestigationState)
 builder.add_node("detect_events", detect_events)
+builder.add_node("enrich_alerts", enrich_alerts)
 builder.add_node("summarize_findings", summarize_findings)
 builder.add_node("ask_local_llm", ask_local_llm)
 
 builder.add_edge(START, "detect_events")
-builder.add_edge("detect_events", "summarize_findings")
+builder.add_edge("detect_events", "enrich_alerts")
+builder.add_edge("enrich_alerts", "summarize_findings")
 builder.add_edge("summarize_findings", "ask_local_llm")
 builder.add_edge("ask_local_llm", END)
 
 investigation_graph = builder.compile()
+
 
 
 def main() -> None:
