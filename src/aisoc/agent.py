@@ -1,0 +1,141 @@
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import TypedDict
+
+import httpx
+from langgraph.graph import END, START, StateGraph
+
+from src.aisoc.detector import detect_failed_login_bursts, load_logs
+
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3.2:3b"
+REPORT_DIR = Path("reports")
+
+
+class InvestigationState(TypedDict):
+    logs: list[dict]
+    rule_alerts: list[dict]
+    summary: str
+    ai_analysis: str
+
+
+def detect_events(state: InvestigationState) -> dict:
+    return {"rule_alerts": detect_failed_login_bursts(state["logs"])}
+
+
+def summarize_findings(state: InvestigationState) -> dict:
+    alerts = state["rule_alerts"]
+
+    if not alerts:
+        summary = "No alerts matched the configured detection rule."
+    else:
+        summary = " ".join(alert["evidence"] for alert in alerts)
+
+    return {"summary": summary}
+
+
+def ask_local_llm(state: InvestigationState) -> dict:
+    evidence = {
+        "rule_alerts": state["rule_alerts"],
+        "summary": state["summary"],
+    }
+
+    prompt = f"""
+You are an assistant for a SOC Tier 1 analyst.
+Analyze ONLY the supplied detector output.
+Do not invent events, users, or IP reputation.
+Do not claim an attack is confirmed without evidence.
+Separate observed facts from possible explanations.
+Mention limitations and recommend read-only investigation steps.
+Never automatically block IPs or change accounts.
+
+Detector output:
+{json.dumps(evidence, indent=2)}
+
+Write a concise report with these headings:
+1. Observed evidence
+2. Possible interpretation
+3. Confidence and limitations
+4. Recommended next steps
+"""
+
+    try:
+        response = httpx.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+            },
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        analysis = response.json().get("response", "").strip()
+        if not analysis:
+            analysis = "The local model returned an empty response."
+
+    except (httpx.HTTPError, ValueError) as error:
+        analysis = (
+            "Local LLM analysis unavailable. "
+            f"{type(error).__name__}: {error}"
+        )
+
+    return {"ai_analysis": analysis}
+
+
+builder = StateGraph(InvestigationState)
+builder.add_node("detect_events", detect_events)
+builder.add_node("summarize_findings", summarize_findings)
+builder.add_node("ask_local_llm", ask_local_llm)
+
+builder.add_edge(START, "detect_events")
+builder.add_edge("detect_events", "summarize_findings")
+builder.add_edge("summarize_findings", "ask_local_llm")
+builder.add_edge("ask_local_llm", END)
+
+investigation_graph = builder.compile()
+
+
+def main() -> None:
+    logs = load_logs()
+
+    result = investigation_graph.invoke({
+        "logs": logs,
+        "rule_alerts": [],
+        "summary": "",
+        "ai_analysis": "",
+    })
+
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    report = {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "project": "AI SOC Investigation Agent",
+        "events_analyzed": len(result["logs"]),
+        "alerts_found": len(result["rule_alerts"]),
+        "evidence_summary": result["summary"],
+        "rule_alerts": result["rule_alerts"],
+        "ai_analysis": result["ai_analysis"],
+        "disclaimer": (
+            "Preliminary analysis only. LLM output is not verified evidence. "
+            "Confirm findings using authorized logs and other evidence."
+        ),
+    }
+
+    report_path = REPORT_DIR / "latest_report.json"
+    report_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    print("Investigation workflow completed.")
+    print(f"Events analyzed: {report['events_analyzed']}")
+    print(f"Alerts found: {report['alerts_found']}")
+    print(f"JSON report saved: {report_path}")
+    print(f"Summary: {report['evidence_summary']}")
+
+
+if __name__ == "__main__":
+    main()
