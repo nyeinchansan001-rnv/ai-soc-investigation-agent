@@ -16,3 +16,6 @@ reports/*.json
 .DS_Store
 .vscode/
 .idea/
+
+# Test cache
+.pytest_cache/
